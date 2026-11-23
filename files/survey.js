@@ -1,12 +1,14 @@
-/* Static (no-server) version of the picture-study survey, IRB 26-0555, B2 (11-22). Built by build_static.py.
+/* Static version of the picture-study survey, IRB 26-0555, G (11-22). Built by build_static_G.py.
    Ports the hosted app's flow (study_logic.Engine) and page rendering (app.render_page) to the browser.
-   Nothing is sent anywhere. Answers stay in this tab (sessionStorage) until the participant chooses
-   "Yes, use my answers"; the end page then offers ONE file, ps_<code>.json, in the app's kept-file schema.
+   Answers stay in this tab (sessionStorage) until the participant chooses "Yes, use my answers"; then, and only
+   then, the page sends ONE request to D.submit_url (the private Google Sheet's Apps Script web app): the kept file
+   ps_<code>.json as text/plain, fetch mode no-cors (the reply cannot be read, so "sent" means the request left
+   without a network error). The end page also offers the same file as a download. Nothing is sent at "No" or Reset.
    Every storage call is wrapped in try/catch; the survey still runs when storage is blocked. */
 (function () {
   'use strict';
   var D = window.PS_DATA;
-  var KEY = { state: 'ps_state', kept: 'ps_kept', done: 'ps_done' };
+  var KEY = { state: 'ps_state', kept: 'ps_kept', done: 'ps_done', sent: 'ps_sent' };
   var root = document.getElementById('app');
   var S = null;        // the response in progress
   var KEPT = null;     // the kept file (after "Yes, use my answers")
@@ -236,6 +238,38 @@
       kept_order: 1, format: D.format };
     sset('sessionStorage', KEY.kept, KEPT);
     finish('END_THANKS');
+    sendNow();             // the one request (Try again repeats it only after a network error)
+  }
+
+  // ---- sending (only after "Yes, use my answers") ----
+  function send(cb) {
+    var url = D.submit_url, body = JSON.stringify(KEPT);
+    if (!url) { cb(false); return; }
+    try {
+      if (window.fetch) {
+        window.fetch(url, { method: 'POST', mode: 'no-cors', credentials: 'omit', cache: 'no-store',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: body })
+          .then(function () { cb(true); }, function () { cb(false); });
+        return;
+      }
+      if (navigator.sendBeacon) {
+        cb(!!navigator.sendBeacon(url, new Blob([body], { type: 'text/plain;charset=utf-8' })));
+        return;
+      }
+    } catch (e) { /* fall through */ }
+    cb(false);
+  }
+
+  var SENDING = false;
+  function sendNow() {
+    if (SENDING || !KEPT || !D.submit_url) { return; }
+    SENDING = true;
+    thanksPage();
+    send(function (ok) {
+      SENDING = false;
+      if (ok) { sset('sessionStorage', KEY.sent, 1); }
+      if (KEPT) { thanksPage(); }
+    });
   }
 
   function finish(name) {
@@ -259,20 +293,33 @@
   function fileName() { return 'ps_' + KEPT.code + '.json'; }
 
   function thanksPage() {
+    var sent = !!sget('sessionStorage', KEY.sent), url = !!D.submit_url;
+    var status;
+    if (sent) {
+      status = '<p class="mail" id="sendmsg">' + esc(D.end.END_THANKS) + '</p>';
+    } else if (SENDING) {
+      status = '<p class="mail" id="sendmsg">' + esc(D.sending_line) + '</p>';
+    } else {
+      status = '<p class="mail" id="sendmsg">' + esc(url ? D.fail_line : D.email_line) + '</p>' +
+        (url ? '<p><button type="button" id="retry" class="big">Try again</button></p>' : '');
+    }
     root.innerHTML =
-      '<div class="end">' +
-      '<p><button type="button" id="dl" class="big">Download my answers</button></p>' +
-      '<p class="mail">' + esc(D.email_line) + '</p>' +
-      '<p>' + esc(D.end.END_THANKS) + '</p>' +
+      '<div class="end">' + status +
+      '<p><button type="button" id="dl"' + (sent ? '' : ' class="big"') + '>Download my answers</button></p>' +
       '<p>The file is named <b>' + esc(fileName()) + '</b>.</p>' +
-      '<div class="cp"><p><b>If the download does not work:</b> copy the text below and paste it into your email.</p>' +
-      '<textarea id="cpbox" readonly></textarea>' +
-      '<p><button type="button" id="cpbtn">Copy my answers</button> <span id="cpmsg"></span></p></div>' +
+      (sent ? '' :
+        '<div class="cp"><p><b>If the download does not work:</b> copy the text below and paste it into your email.</p>' +
+        '<textarea id="cpbox" readonly></textarea>' +
+        '<p><button type="button" id="cpbtn">Copy my answers</button> <span id="cpmsg"></span></p></div>') +
       '<p style="margin-top:30px"><button type="button" id="rstbtn" class="reset">Reset survey</button></p>' +
       '</div>';
-    document.getElementById('cpbox').value = fileText();
+    if (!sent) {
+      document.getElementById('cpbox').value = fileText();
+      document.getElementById('cpbtn').addEventListener('click', copyText);
+    }
+    var r = document.getElementById('retry');
+    if (r) { r.addEventListener('click', sendNow); }
     document.getElementById('dl').addEventListener('click', download);
-    document.getElementById('cpbtn').addEventListener('click', copyText);
     document.getElementById('rstbtn').addEventListener('click', reset);
     window.scrollTo(0, 0);
   }
@@ -335,7 +382,10 @@
     KEPT = sget('sessionStorage', KEY.kept);
     if (S && S.block && D.blocks[S.block]) { current(); return; }
     S = null;
-    if (KEPT) { thanksPage(); return; }        // a reload of the end page keeps the download
+    if (KEPT) {                                // a reload of the end page keeps the download
+      if (!sget('sessionStorage', KEY.sent) && D.submit_url) { sendNow(); } else { thanksPage(); }
+      return;
+    }
     if (sget('localStorage', KEY.done)) { endPage('REPEAT_VISIT'); return; }
     if (closed()) { endPage('END_CLOSED'); return; }
     welcome();
